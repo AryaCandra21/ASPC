@@ -1,18 +1,151 @@
 ---
-title: "ASPC"
-author: "Arya Candra Kusuma"
-date: "`r Sys.Date()`"
+title: "AnalisisASPC_ANN"
+author: "Arya Candra"
+date: "5/2/2022"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE,
-                      warning = F,
                       message = F,
+                      warning = F,
                       comment = "",
                       fig.width = 10,
                       fig.asp = 0.618)
 ```
+
+
+# Load Data
+
+```{r}
+library(tidyverse)
+
+cancer_rates <- read_csv("Data/cancer-death-rates.csv")
+cancer_rates <- cancer_rates %>%
+  rename(
+    "death_rates" = `Deaths - Neoplasms - Sex: Both - Age: Age-standardized (Rate)`
+  )
+
+cancer_rates %>%
+  filter(
+    str_detect(Entity, "ian")
+  )
+
+asia <- readxl::read_xlsx("Data/AsiaEntity.xlsx")
+asia
+length(asia$Entity)
+
+
+cancer_rates_asia <- asia %>%
+  left_join(cancer_rates)
+cancer_rates_asia
+
+length(unique(cancer_rates_asia$Entity))
+```
+
+# Plot time series
+
+```{r}
+ggplot(data = cancer_rates_asia,
+       aes(x = Year,
+           y = death_rates))+
+  geom_line(
+    aes(group = Entity))
+```
+
+# Clustering
+
+```{r}
+cancer_rates_asia_2000 <- cancer_rates_asia %>%
+  filter(
+    Year >= 2000
+  )
+
+# kita buat clustering
+library(factoextra)
+# package untuk clustering
+library(dtw)
+library(dtwclust)
+
+#buat data dist
+data_dist <- cancer_rates_asia_2000 %>%
+  pivot_wider(
+    names_from = Year,
+    values_from = death_rates)
+daftar_negara <- data_dist$Entity
+
+
+data_dist <- data_dist %>%
+  select(-Entity,-Code) %>%
+  #jadikan matriks
+  as.matrix.data.frame()
+rownames(data_dist) <- daftar_negara
+
+head(data_dist)
+```
+
+```{r}
+# menentukan banyaknya cluster
+cluster_ts <- function(k) {
+  res_clust <- tsclust(
+    series = data_dist,
+    type = "hierarchical",
+    k = k,
+    distance = "DTW",
+    control = hierarchical_control(
+      # pakai complete linkage  
+      method = "average"
+    )
+  )
+  return(cvi(res_clust))
+}
+
+hasil <- sapply(2:10, FUN = function(x) {
+  cluster_ts(x)
+})
+
+colnames(hasil) <- paste(
+  "k_",
+  seq(2, 10)
+)
+
+hasil
+```
+
+  - "Sil": Silhouette index (Rousseeuw (1987); to be maximized).
+  - "D": Dunn index (Arbelaitz et al. (2013); to be maximized).
+  - "COP": COP index (Arbelaitz et al. (2013); to be minimized).
+  - "DB": Davies-Bouldin index (Arbelaitz et al. (2013); to be minimized).
+  - "DBstar": Modified Davies-Bouldin index (DB*) (Kim and Ramakrishna (2005); to be minimized).
+  - "CH": Calinski-Harabasz index (Arbelaitz et al. (2013); to be maximized).
+  - "SF": Score Function (Saitta et al. (2007); to be maximized; see notes).
+  
+
+
+```{r}
+set.seed(200)
+# buat cluster hierarchical dengan dist DTW dan linkage complete
+model_cluster <- tsclust(
+  series = data_dist,
+  type = "hierarchical",
+  k = 5,
+  distance = "DTW",
+  control = hierarchical_control(
+    # pakai complete linkage
+    method = "average"
+  )
+)
+
+model_cluster
+
+dendrogram <- fviz_dend(model_cluster,horiz = T,
+  # misal 4 cluster
+  k = 5)+
+  labs(title = "Kanker death rates Mulai 2000",
+       subtitle = "Hierarchical, distance = DTW, Method = Average Linkage")
+dendrogram
+```
+
 
 # Load Data
 
@@ -188,7 +321,6 @@ ggplot(data = cluster_death_rates)+
     y = "death rates")
 ```
 
-
 # Train test split
 
 Kita split datanya, untuk data test diambil yang tahun 2017, 2018, 2019 (3 tahun yang paling akhir).
@@ -202,20 +334,23 @@ test <- cluster_death_rates %>%
     Year >= 2017)
 ```
 
-Buat model ARIMA untuk setiap cluster
+# Modelling
+
+Buat model ANN untuk setiap cluster
 
 ```{r}
 library(forecast)
 
 #pakai data train
-list_df <- split(train,
+list_df_train <- split(train,
                  train$cluster)
 #cukup panjang, jadi intinya bikin list df untuk tiap cluster.
 # contohnya untuk cluster 1 gini
-list_df[[1]]
+list_df_train[[1]]
+
 ```
 
-# Cek residual
+## Cek residualnya
 
 ```{r}
 library(nortest)
@@ -223,12 +358,16 @@ cek_residual <- function(model, i) {
   
   #cek visual
   checkresiduals(model)
+  
   #cek normalitas
   print(shapiro.test(model$residuals))
   print(lillie.test(model$residuals))
   
   #cek homogenitas
-  print(nortsTest::arch.test(model$residuals))
+  print(nortsTest::arch.test(
+    model$residuals[!is.na(model$residuals)]
+    )
+  )
   
   #forecastnya
   prediksi <- forecast(model) %>%
@@ -253,60 +392,68 @@ cek_residual <- function(model, i) {
   print("RMSE test set")
   print(DescTools::RMSE(test_i$death_rates, three_years))
 }
+
+
 ```
+
+
 
 ## Cluster 1
 
 ```{r}
-model_c1 <- auto.arima(list_df[[1]]$death_rates)
-model_c1
-cek_residual(model_c1, 1)
+ann_c1 <- nnetar(
+  ts(list_df_train[[1]]$death_rates,
+     start = 2000),
+  )
+ann_c1
+
+cek_residual(ann_c1, 1)
 ```
 
 ## Cluster 2
 
 ```{r}
-model_c2 <- auto.arima(list_df[[2]]$death_rates)
-model_c2
-cek_residual(model_c2, 2)
+ann_c2 <- nnetar(
+  ts(list_df_train[[2]]$death_rates,
+     start = 2000),
+  )
+ann_c2
+
+cek_residual(ann_c2, 2)
 ```
 
 ## Cluster 3
 
 ```{r}
-model_c3 <- auto.arima(list_df[[3]]$death_rates)
-model_c3
-cek_residual(model_c3, 3)
+ann_c3 <- nnetar(
+  ts(list_df_train[[3]]$death_rates,
+     start = 2000),
+  )
+ann_c3
+
+cek_residual(ann_c3, 3)
 ```
 
 ## Cluster 4
 
 ```{r}
-model_c4 <- auto.arima(list_df[[4]]$death_rates)
-model_c4
-cek_residual(model_c4, 4)
+ann_c4 <- nnetar(
+  ts(list_df_train[[4]]$death_rates,
+     start = 2000),
+  )
+ann_c4
+
+cek_residual(ann_c4, 4)
 ```
 
 ## Cluster 5
 
 ```{r}
-model_c5 <- auto.arima(list_df[[5]]$death_rates)
-model_c5
-cek_residual(model_c5, 5)
+ann_c5 <- nnetar(
+  ts(list_df_train[[5]]$death_rates,
+     start = 2000),
+  )
+ann_c5
+
+cek_residual(ann_c5, 5)
 ```
-
-
-Terlihat masih untuk Ljung Box masih tolak H0 kita naikkan derajat integrated.
-
-```{r}
-model_c5_over <- arima(list_df[[5]]$death_rates,
-                       order = c(2, 1, 0))
-model_c5_over
-cek_residual(model_c5_over, 5)
-```
-
-```{r}
-# writexl::write_xlsx(cancer_rates_asia,
-#                     path = "data/cancer_rates_asia.xlsx")
-```
-
